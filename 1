@@ -1,0 +1,167 @@
+import pytz
+import pandas as pd
+import numpy as np
+import pickle
+from datetime import datetime
+import warnings
+from sklearn.exceptions import InconsistentVersionWarning
+import asyncio
+from telegram import Bot
+import requests
+from Read_cloud import ThingSpeakDataloader
+
+warnings.filterwarnings("ignore", category=InconsistentVersionWarning)
+
+
+
+def map_humidity_category(humidity):
+    if 30 <= humidity <= 50:
+        return 'NORMAL'
+    elif 40 <= humidity <= 60:
+        return 'SUNNY'
+    elif 20 <= humidity <= 40:
+        return 'WINDY'
+    elif 50 <= humidity <= 70:
+        return 'RAINY'
+    else:
+        return 'RAINY'
+
+def map_soil_moisture(reading):
+    if 0 <= reading <= 300:
+        return 'DRY'
+    elif 300 < reading <= 600:
+        return 'HUMID'
+    elif 600 < reading <= 1023:
+        return 'WET'
+    else:
+        return 'WET'
+
+def map_temperature_range(temperature):
+    if temperature >= 0 and temperature < 20:
+        return '0-20'
+    elif temperature >= 20 and temperature < 30:
+        return '20-30'
+    elif temperature >= 30 and temperature < 40:
+        return '30-40'
+    elif temperature >= 40 and temperature <= 50:
+        return '40-50'
+    else:
+        return '40-50'
+
+def get_indian_time():
+    ist = pytz.timezone('Asia/Kolkata')
+    current_time = datetime.now(ist)
+    date = current_time.strftime('%Y-%m-%d')
+    day = current_time.strftime('%A')
+    time_12hr_format = current_time.strftime('%I:%M %p')
+    return date, day, time_12hr_format
+
+
+# Example usage:
+channel_id = '2568388'
+read_api_key = 'NIVVIRR4T4FRFA5G'
+num_readings = 10
+
+mapper = ThingSpeakDataloader(channel_id, read_api_key, num_readings)
+mapper.fetch_and_map_data()
+
+# Load the trained model
+with open('random_forest_model.pkl', 'rb') as file:
+    model = pickle.load(file)
+
+# Take user input for 'CROP TYPE'
+user_crop_type = input("Enter the CROP TYPE: ")
+
+# Read data from final.csv
+final_csv_file = "final.csv"
+final_data = pd.read_csv(final_csv_file)
+
+# Drop rows with missing values
+final_data = final_data.dropna()
+
+# Mapping for CROP TYPE
+crop_type_mapping = {'BANANA': 0, 'BEAN': 1, 'CABBAGE': 2, 'CITRUS': 3, 'COTTON': 4, 'MAIZE': 5, 'MELON': 6,
+                     'MUSTARD': 7, 'ONION': 8, 'POTATO': 9, 'RICE': 10, 'SOYABEAN': 11, 'SUGARCANE': 12,
+                     'TOMATO': 13, 'WHEAT': 14}
+
+# Mapping for SOIL TYPE
+soil_type_mapping = {'DRY': 0, 'HUMID': 1, 'WET': 2}
+
+# Mapping for TEMPERATURE
+temperature_mapping = {'0-20': 0, '20-30': 1, '30-40': 2, '40-50': 3}
+
+# Mapping for WEATHER CONDITION
+weather_condition_mapping = {'NORMAL': 0, 'RAINY': 1, 'SUNNY': 2, 'WINDY': 3}
+
+# Add 'CROP TYPE' column at the beginning of the DataFrame
+final_data.insert(0, 'CROP TYPE', user_crop_type)
+
+# Apply mappings to final data
+final_data['CROP TYPE'] = final_data['CROP TYPE'].map(crop_type_mapping)
+final_data['SOIL TYPE'] = final_data['SOIL TYPE'].map(soil_type_mapping)
+final_data['TEMPERATURE'] = final_data['TEMPERATURE'].map(temperature_mapping)
+final_data['WEATHER CONDITION'] = final_data['WEATHER CONDITION'].map(weather_condition_mapping)
+
+# Assuming you have loaded your trained model in the variable 'model'
+# Drop the 'Predicted' column if it already exists
+if 'Predicted' in final_data.columns:
+    final_data = final_data.drop('Predicted', axis=1)
+
+# Make predictions
+y_pred = model.predict(final_data)
+
+# Round the predicted values to 2 decimal places
+rounded_predictions = np.round(y_pred, 2)
+
+# Display the predictions
+df_predictions = pd.DataFrame({'Predicted': rounded_predictions})
+
+# Calculate and display the average
+average_prediction = np.mean(rounded_predictions)
+
+print("---------------------------------------------------")
+print("CROP :", user_crop_type)
+print("Predicted Average Water for", user_crop_type, ":", round(average_prediction, 2), "Litres")
+print("---------------------------------------------------")
+
+
+# ThingSpeak API endpoint URL
+thingspeak_url = "https://api.thingspeak.com/update"
+
+# Your ThingSpeak API key
+api_key = "LJ0QXX5WQMVS2C4Z"
+
+# Average prediction value # Replace with your calculated average prediction value
+average_prediction1 = average_prediction
+# Prepare the data payload to send to ThingSpeak
+data = {
+    "api_key": api_key,
+    "field4": average_prediction1
+}
+
+# Send the data to ThingSpeak
+try:
+    response = requests.post(thingspeak_url, data=data)
+    if response.status_code == 200:
+        print("Data sent to ThingSpeak successfully.")
+    else:
+        print("Failed to send data to ThingSpeak. HTTP status code:", response.status_code)
+except Exception as e:
+    print("An error occurred:", e)
+
+async def send_telegram_message():
+    # Replace 'YOUR_API_TOKEN' with your actual API token
+    bot = Bot(token='6380365663:AAEtIyEFj2J1VMrsAJ2TXEmoxngk2NQhrYk')
+    # Replace 'YOUR_CHAT_ID' with the chat ID you want to send the message to
+    chat_id = '1655489167'
+    # Replace 'YOUR_MESSAGE' with the message you want to send
+    message = f"Predicted Average Water for {user_crop_type}: {round(average_prediction, 2)} Litres"
+    # Send the message
+    await bot.send_message(chat_id=chat_id, text=message)
+
+# Create and run an event loop
+async def main():
+    asyncio.create_task(send_telegram_message())
+    await asyncio.sleep(1)  # Ensure the task has time to complete
+
+asyncio.run(main())
